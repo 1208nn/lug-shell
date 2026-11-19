@@ -1,0 +1,6 @@
+[project]
+name = "lug-shell"
+version = "0.1.0"
+description = "LUG 终端挑战 —— 摊位上的 shell 任务游戏"
+requires-python = ">=3.13"
+dependencies = []
