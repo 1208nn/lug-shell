@@ -50,6 +50,8 @@ mise exec -- uv run python main.py
 - 任务说明以 `#` 注释出现在终端里，大多数任务一条命令就能完成。
 - 执行正确命令后会打印模拟输出，进入下一任务。
 - 卡住可以输入 `hint` 看提示，或输入 `skip` 跳过（扣 10 秒）。
+- 任务只看目标，不强制唯一答案：列出日志可以用 `ls *.log`、`find`、`fd`、`rg`，读文件可以用 `cat`、`less`、`head`、`bat`。
+- 已知命令不会伪造 `command not found`；摊位机器没模拟的命令会明确告诉你。
 - 时间结束或 5 个任务完成，进入结算。
 
 ### 行编辑
@@ -79,7 +81,7 @@ mise exec -- uv run python main.py
 - 目录侦察：`ls -la`
 - 读手册：`cat README.md`
 - 找日志：`grep -r ERROR logs`
-- 找文件：`find . -name "*.log"`
+- 找日志：`ls *.log`、`find . -name "*.log"`
 - 磁盘：`df -h`
 - 进程：`ps aux | grep python`
 - 权限：`chmod +x deploy.sh`

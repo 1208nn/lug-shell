@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import fnmatch
 import random
+import shlex
 from dataclasses import dataclass
 
 from canvas import (
@@ -250,58 +252,275 @@ class Shell:
                 c.cursor(x, iy, ch)
 
 
+ROOT_FILES = ("README.md", "deploy.sh", "notes.txt", "app.log", "error.log",
+              "access.log", "logs", ".git")
+LOG_FILES = ("app.log", "error.log", "access.log")
+APP_LOG = (
+    ("2026-11-19 14:32:07 INFO  booth started", M_OUT),
+    ("2026-11-19 14:32:07 ERROR database connection lost", M_ERR),
+    ("2026-11-19 14:32:08 INFO  retrying in 3s", M_OUT),
+)
+ERROR_LOG = (
+    ("2026-11-19 14:32:09 ERROR retry limit reached", M_ERR),
+    ("2026-11-19 14:32:10 WARN  backing off", M_WARN),
+)
+ACCESS_LOG = (
+    ("10.0.0.8 - - [19/Nov/2026:14:31:58] GET / 200", M_OUT),
+    ("10.0.0.9 - - [19/Nov/2026:14:32:01] POST /join 302", M_OUT),
+    ("10.0.0.9 - - [19/Nov/2026:14:32:02] GET /favicon.ico 404", M_WARN),
+)
+KNOWN_COMMANDS = {
+    "less", "more", "head", "tail", "bat", "nl", "sed", "awk", "man",
+    "vim", "nano", "emacs", "htop", "top", "pkill", "chown", "gzip",
+    "zip", "unzip", "wget", "ping", "ss", "netstat", "lsof", "which",
+    "whereis", "type", "alias", "export", "source", "env", "printenv",
+    "id", "groups", "stat", "file", "wc", "sort", "uniq", "cut", "tr",
+    "xargs", "tee", "watch", "crontab", "useradd", "passwd", "sudo",
+    "su", "apt", "dnf", "pacman", "podman", "eza", "exa", "ag",
+    "rm", "cp", "mv", "mkdir", "rmdir", "touch", "ln", "basename",
+    "dirname", "realpath", "readlink", "md5sum", "sha256sum", "diff",
+    "patch", "strings", "xxd", "hexdump", "od", "seq", "yes", "sleep",
+    "timeout", "nohup", "jobs", "bg", "fg", "wait", "exit", "unset",
+    "set", "trap", "printf", "lsblk", "blkid", "fdisk", "parted",
+    "dd", "sync", "reboot", "shutdown", "dmesg", "killall", "nice",
+    "renice", "vmstat", "iostat", "sar", "traceroute", "dig",
+    "nslookup", "host", "ip", "ifconfig", "route", "ip", "cmake",
+    "gcc", "clang", "python", "python3", "node", "npm", "cargo",
+    "rustc", "go", "java", "javac", "jq", "yq", "fzf", "zoxide",
+    "tmux", "screen", "neofetch", "fastfetch", "btop",
+}
+TREE = (
+    (".", M_DIM),
+    ("├── README.md", M_OUT),
+    ("├── access.log", M_PATH),
+    ("├── app.log", M_PATH),
+    ("├── deploy.sh", M_OK),
+    ("├── error.log", M_ERR),
+    ("├── logs", M_PATH),
+    ("│   ├── access.log", M_OUT),
+    ("│   ├── app.log", M_OUT),
+    ("│   └── error.log", M_OUT),
+    ("└── notes.txt", M_OUT),
+)
+
+
+def _ls(args, shell: Shell):
+    flags = "".join(a[1:] for a in args if a.startswith("-") and not a.startswith("--"))
+    paths = [a for a in args if not a.startswith("-")]
+    if shell.cwd == "~/logs":
+        base = list(LOG_FILES)
+    else:
+        base = list(ROOT_FILES)
+
+    def show(names, detailed=False):
+        if detailed:
+            from missions import LS_LOGS, LS_ROOT
+            if shell.cwd == "~/logs":
+                return LS_LOGS if names == base else tuple((f"-rw-r--r-- 1 lug lug 420 Nov 19 20:01 {n}", M_OUT) for n in names)
+            if names == base:
+                return LS_ROOT
+            return tuple((f"-rw-r--r-- 1 lug lug 420 Nov 19 20:01 {n}", M_PATH if n.endswith('.log') else M_OUT) for n in names)
+        return tuple((n + ("/" if n == "logs" else ""), M_PATH if n.endswith(".log") or n == "logs" else M_OUT) for n in names)
+
+    if "R" in flags:
+        out = [(".", M_DIM)]
+        out.extend(show(base))
+        out.append(("", M_OUT))
+        out.append(("logs:", M_DIM))
+        out.extend(show(list(LOG_FILES)))
+        return tuple(out)
+
+    if not paths:
+        return show(base, "l" in flags)
+
+    out = []
+    for path in paths:
+        if path in (".", "./"):
+            out.extend(show(base, "l" in flags))
+        elif path in ("logs", "logs/", "./logs", "./logs/"):
+            out.extend(show(list(LOG_FILES), "l" in flags))
+        elif "*" in path or "?" in path:
+            names = [n for n in base if fnmatch.fnmatch(n, path)]
+            if names:
+                out.extend(show(names, "l" in flags))
+            else:
+                out.append((f"ls: cannot access '{path}': No such file or directory", M_ERR))
+        elif path in base:
+            out.extend(show([path], "l" in flags))
+        elif path in LOG_FILES and shell.cwd != "~/logs":
+            out.append((path, M_PATH))
+        else:
+            out.append((f"ls: cannot access '{path}': No such file or directory", M_ERR))
+    return tuple(out)
+
+
+def _find(args):
+    pattern = "*"
+    if "-name" in args:
+        i = args.index("-name")
+        if i + 1 < len(args):
+            pattern = args[i + 1]
+    search_logs = any(a in ("logs", "logs/", "./logs", "./logs/") for a in args)
+    out = []
+    if not search_logs:
+        for name in ROOT_FILES:
+            if name != "logs" and fnmatch.fnmatch(name, pattern):
+                out.append((f"./{name}", M_PATH if name.endswith(".log") else M_OUT))
+    for name in LOG_FILES:
+        if fnmatch.fnmatch(name, pattern):
+            out.append((f"./logs/{name}", M_OUT))
+    return tuple(out)
+
+
+def _cat(args):
+    files = {
+        "README.md": README,
+        "notes.txt": (("摊位备忘记：网线在左边抽屉。", M_OUT), ("下次记得带转接头。", M_DIM)),
+        "app.log": APP_LOG,
+        "error.log": ERROR_LOG,
+        "access.log": ACCESS_LOG,
+        "logs/app.log": APP_LOG,
+        "logs/error.log": ERROR_LOG,
+        "logs/access.log": ACCESS_LOG,
+    }
+    if not args:
+        return True, (("cat: missing operand", M_ERR),)
+    out = []
+    for name in args:
+        if name in files:
+            out.extend(files[name])
+        else:
+            out.append((f"cat: {name}: No such file or directory", M_ERR))
+    return True, tuple(out)
+
+
+def _grep(args, shell: Shell):
+    if not args:
+        return True, (("grep: missing pattern", M_ERR),)
+    flags = [a for a in args if a.startswith("-")]
+    rest = [a for a in args if not a.startswith("-")]
+    pattern = rest[0] if rest else ""
+    paths = rest[1:] or (["."] if "-r" in " ".join(flags) or "R" in "".join(flags) else [])
+    out = []
+    pat = pattern.strip("'\"")
+    files = {
+        "README.md": README,
+        "app.log": APP_LOG,
+        "error.log": ERROR_LOG,
+        "access.log": ACCESS_LOG,
+        "logs/app.log": APP_LOG,
+        "logs/error.log": ERROR_LOG,
+        "logs/access.log": ACCESS_LOG,
+    }
+    chosen = []
+    for p in paths:
+        if p in (".", "./"):
+            chosen.extend(files.items())
+        elif p in ("logs", "logs/", "./logs"):
+            chosen.extend((k, v) for k, v in files.items() if k.startswith("logs/"))
+        elif any(ch in p for ch in "*?"):
+            for k, v in files.items():
+                if fnmatch.fnmatch(k, p):
+                    chosen.append((k, v))
+        elif p in files:
+            chosen.append((p, files[p]))
+    if not chosen:
+        return True, (("grep: no such file or directory", M_ERR),)
+    for name, lines in chosen:
+        for line, _ in lines:
+            if pat.lower() in line.lower():
+                prefix = f"{name}:" if len(chosen) > 1 or "-r" in " ".join(flags) else ""
+                out.append((prefix + line, M_ERR if "ERROR" in line else M_OUT))
+    return True, tuple(out) or (("", M_OUT),)
+
+
 def _generic(line: str, shell: Shell) -> tuple[bool, tuple[tuple[str, str], ...]]:
-    """极小的模拟 shell：让输入不只是对着任务表。"""
+    """极小的模拟 shell：已知命令永远不会报 command not found。"""
+    try:
+        tokens = shlex.split(line)
+    except ValueError:
+        tokens = line.split()
+    if not tokens:
+        return False, ()
+    cmd, args = tokens[0], tokens[1:]
+    if "/" in cmd:
+        cmd = cmd.rsplit("/", 1)[-1]
     low = " ".join(line.strip().split())
-    if low in ("pwd",):
+
+    if cmd == "ls":
+        return True, _ls(args, shell)
+    if cmd == "cat":
+        return _cat(args)
+    if cmd == "find":
+        return True, _find(args)
+    if cmd in ("grep", "rg", "ack", "ag"):
+        return _grep(args, shell)
+    if cmd == "fd":
+        return True, _find(args)
+    if cmd == "tree":
+        return True, TREE
+    if cmd == "pwd":
         return True, ((f"/home/lug/{shell.cwd[2:]}" if shell.cwd != "~" else "/home/lug", M_OUT),)
-    if low in ("ls", "ls -l", "ls -la", "ls -al"):
-        if shell.cwd == "~/logs":
-            from missions import LS_LOGS
-            return True, LS_LOGS
-        from missions import LS_ROOT
-        return True, LS_ROOT
-    if low in ("cd logs", "cd ./logs"):
-        shell.cwd = "~/logs"
+    if cmd == "cd":
+        where = args[0] if args else "~"
+        if where in ("logs", "./logs"):
+            shell.cwd = "~/logs"
+        elif where in ("..", "~", "/home/lug"):
+            shell.cwd = "~"
+        else:
+            return True, ((f"bash: cd: {where}: No such file or directory", M_ERR),)
         return True, ()
-    if low in ("cd ..", "cd ~", "cd"):
-        shell.cwd = "~"
-        return True, ()
-    if low == "history":
+    if cmd == "history":
         rows = shell.editor.history[-10:]
-        return True, tuple((f"{i + 1:4}  {cmd}", M_OUT) for i, cmd in enumerate(rows))
-    if low == "whoami":
+        return True, tuple((f"{i + 1:4}  {x}", M_OUT) for i, x in enumerate(rows))
+    if cmd == "whoami":
         return True, (("lug", M_OUT),)
-    if low in ("date",):
+    if cmd == "date":
         return True, (("Thu Nov 19 20:02:00 CST 2026", M_OUT),)
-    if low in ("uname -a", "uname"):
+    if cmd == "uname":
         return True, (("Linux lug-booth 6.8.0-lug #1 SMP x86_64 GNU/Linux", M_OUT),)
-    if low == "cat README.md":
-        from missions import README
-        return True, README
-    if low == "cat notes.txt":
-        return True, (("摊位备忘记：网线在左边抽屉。", M_OUT), ("下次记得带转接头。", M_DIM))
-    if low == "cat logs/app.log":
-        return True, (("2026-11-19 14:32:07 INFO  booth started", M_OUT),
-                      ("2026-11-19 14:32:07 ERROR database connection lost", M_ERR),
-                      ("2026-11-19 14:32:08 INFO  retrying in 3s", M_OUT))
-    if low == "cat logs/error.log":
-        return True, (("2026-11-19 14:32:09 ERROR retry limit reached", M_ERR),
-                      ("2026-11-19 14:32:10 WARN  backing off", M_WARN))
-    if low == "df -h":
-        from missions import MISSIONS
-        for m in MISSIONS:
-            if m.title == "磁盘还有空间吗":
-                return True, m.steps[0].output
-    if low == "ps aux":
+    if cmd == "free":
+        return True, (("               total        used        free      shared  buff/cache", M_DIM),
+                      ("Mem:           7.7Gi       2.1Gi       4.8Gi       128Mi       0.8Gi", M_OUT))
+    if cmd == "df":
+        return True, (("Filesystem      Size  Used Avail Use% Mounted on", M_DIM),
+                      ("/dev/sda1        40G   12G   26G  32% /", M_OUT),
+                      ("tmpfs           1.0G     0  1.0G   0% /dev/shm", M_OUT))
+    if cmd in ("ps", "pgrep"):
         return True, (("USER       PID %CPU %MEM    VSZ   RSS TTY STAT START   TIME COMMAND", M_DIM),
                       ("root         1  0.0  0.1 168000 12000 ?   Ss   19:58   0:01 /sbin/init", M_OUT),
                       ("lug       4242  0.4  1.2 128000 24000 pts/0 S+ 20:01   0:00 python3 booth.py", M_OUT))
-    if low.startswith("echo "):
-        return True, ((low[5:], M_OUT),)
-    if low == "free -h":
-        return True, (("               total        used        free      shared  buff/cache", M_DIM),
-                      ("Mem:           7.7Gi       2.1Gi       4.8Gi       128Mi       0.8Gi", M_OUT))
+    if cmd == "du":
+        return True, (("4.0K    README.md", M_OUT), ("4.0K    deploy.sh", M_OUT),
+                      ("16K     logs", M_PATH), ("4.0K    notes.txt", M_OUT))
+    if cmd == "echo":
+        return True, ((" ".join(args), M_OUT),)
+    if cmd == "git":
+        if args and args[0] == "status":
+            return True, (("On branch master", M_OUT),
+                          ("Changes not staged for commit:", M_WARN),
+                          ("  modified:   README.md", M_OUT),
+                          ("Untracked files:", M_WARN),
+                          ("  logs/", M_OUT),
+                          ("no changes added to commit", M_DIM))
+        return True, (("# 摊位机器只模拟了 git status。", M_DIM),)
+    if cmd == "curl":
+        if any(a in ("-I", "-i", "--head", "-sI") for a in args):
+            return True, (("HTTP/2 200", M_OK),
+                          ("content-type: text/html; charset=UTF-8", M_OUT),
+                          ("server: example", M_DIM),
+                          ("date: Thu, 19 Nov 2026 20:02:00 GMT", M_OUT))
+        return True, (("# 摊位机器只模拟 curl -I。", M_DIM),)
+    if cmd in ("systemctl", "service"):
+        return True, (("● nginx.service - A high performance web server", M_OK),
+                      ("     Loaded: loaded (/lib/systemd/system/nginx.service; enabled)", M_OUT),
+                      ("     Active: active (running) since Thu 2026-11-19 19:58:00 CST", M_OK),
+                      ("   Main PID: 812 (nginx)", M_OUT))
+    if cmd in ("chmod", "tar", "kill", "make", "ssh", "scp", "rsync",
+               "docker", "journalctl", "mount", "umount"):
+        return True, ()
+    if cmd in KNOWN_COMMANDS:
+        return True, (("# 摊位机器只模拟了部分命令。", M_DIM),)
     return False, ()
 
 
