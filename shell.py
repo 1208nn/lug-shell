@@ -13,7 +13,7 @@ from canvas import (
 )
 from missions import (
     DIM as M_DIM, ERR as M_ERR, OK as M_OK, OUT as M_OUT,
-    PATH as M_PATH, WARN as M_WARN, Mission, Step, pick_missions,
+    PATH as M_PATH, WARN as M_WARN, README, Mission, Step, pick_missions,
 )
 
 ROUND_TIME = 75.0
@@ -386,11 +386,22 @@ def _cat(args):
     if not args:
         return True, (("cat: missing operand", M_ERR),)
     out = []
+    selected = []
     for name in args:
-        if name in files:
-            out.extend(files[name])
+        norm = name[2:] if name.startswith("./") else name
+        if norm in files:
+            selected.append(norm)
+        elif any(ch in norm for ch in "*?["):
+            matched = [k for k in files if fnmatch.fnmatch(k, norm)
+                       and (norm != "*" or "/" not in k)]
+            if matched:
+                selected.extend(matched)
+            else:
+                out.append((f"cat: {name}: No such file or directory", M_ERR))
         else:
             out.append((f"cat: {name}: No such file or directory", M_ERR))
+    for name in selected:
+        out.extend(files[name])
     return True, tuple(out)
 
 
@@ -436,6 +447,23 @@ def _grep(args, shell: Shell):
 
 def _generic(line: str, shell: Shell) -> tuple[bool, tuple[tuple[str, str], ...]]:
     """极小的模拟 shell：已知命令永远不会报 command not found。"""
+    if "|" in line:
+        left, right = line.split("|", 1)
+        try:
+            rparts = shlex.split(right)
+        except ValueError:
+            rparts = right.split()
+        if rparts and rparts[0] in ("grep", "rg", "ag", "ack"):
+            ok, output = _generic(left, shell)
+            if not ok:
+                return ok, output
+            args = rparts[1:]
+            pattern = next((a for a in args if not a.startswith("-")), "")
+            pat = pattern.strip("'\"")
+            if pat:
+                output = tuple((text, color) for text, color in output
+                               if pat.lower() in text.lower()) or (("", M_OUT),)
+            return True, output
     try:
         tokens = shlex.split(line)
     except ValueError:
